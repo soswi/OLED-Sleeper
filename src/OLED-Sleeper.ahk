@@ -5,10 +5,8 @@
 ; OLED Sleeper
 ;
 ; Description:
-;   Prevents OLED burn-in on secondary displays by monitoring user activity.
-;   If no mouse or window activity is detected on a given monitor for a defined
-;   idle time, it will either black out the screen or dim it to a specific
-;   brightness level, based on the provided arguments.
+;   Prevents OLED burn-in by monitoring activity per screen.
+;   Now supports independent monitor sleeping and advanced activity rules.
 ;
 ; Dependencies:
 ;   - ControlMyMonitor.exe (located in the ..\tools directory)
@@ -16,18 +14,22 @@
 ;
 ; Usage:
 ;   Run the script with two arguments:
-;   1. A semicolon-separated list of monitor configurations.
-;      - For blackout: \\.\DISPLAY_ID:blackout
-;      - For dimming:  \\.\DISPLAY_ID:dim:LEVEL
-;   2. Idle threshold in milliseconds (e.g., 30000 for 30s)
-;
-;   Example:
-;     "OLED-Sleeper.ahk" "\\.\DISPLAY2:blackout;\\.\DISPLAY3:dim:15" "30000"
+;   1. Monitor list (e.g. "\\.\DISPLAY2:blackout;\\.\DISPLAY3:dim:15")
+;   2. Idle threshold in milliseconds (e.g. 30000)
 ;===============================================================================
 
+; ==============================================================================
+; GLOBAL SETTINGS
+; ==============================================================================
+global PrimaryMonitorBlackout           := 1  ; 1 = Allow primary to sleep, 0 = Primary always stays on
+global SleepRegardlessOfOutsideActivity := 1  ; 1 = Monitor sleeps if IT is idle, even if you type on another screen
+                                              ; 0 = If you are active ANYWHERE, ALL monitors stay awake
+global KeepActiveIfCursorPresent        := 0  ; 1 = Monitor won't sleep if cursor is hovering (even if not moving)
+                                              ; 0 = Monitor sleeps if cursor is static (unless moving)
 
-; === PATH DEFINITIONS ===
-; Build robust paths relative to the script's location.
+; ==============================================================================
+; PATH DEFINITIONS
+; ==============================================================================
 global ProjectRoot := A_ScriptDir . "\.."
 global LogFile     := ProjectRoot . "\OLED-Sleeper.log"
 global MultiTool   := ProjectRoot . "\tools\MultiMonitorTool\MultiMonitorTool.exe"
@@ -35,372 +37,241 @@ global ControlTool := ProjectRoot . "\tools\ControlMyMonitor\ControlMyMonitor.ex
 global TempCsvFile := ProjectRoot . "\monitors_sleeper_temp.csv"
 global RestoreFile := ProjectRoot . "\config\sleeper_restore.dat"
 
-; === CONFIGURATION VARIABLES ===
-global MonitorConfigList := ""  ; Stores the raw input list of monitor configurations
-global IdleThreshold := 0       ; Time (ms) before a monitor is considered idle
-global CheckInterval := 150      ; Frequency (ms) to check each monitor's state
-global UseActiveWindowCheck := false  ; default OFF (prevents instant restore on primary)
-global CursorHidden := false  ; Tracks cursor visibility state
-
-
-; === INTERNAL STATE ===
-global MonitoredScreens := []   ; List of monitor state maps for each target screen
+; ==============================================================================
+; INTERNAL STATE
+; ==============================================================================
+global MonitorConfigList := ""
+global IdleThreshold     := 0
+global CheckInterval     := 200
+global CursorHidden      := false
+global MonitoredScreens  := []
 
 
 ; ==============================================================================
-; LOGGING FUNCTION — Appends messages to log file with timestamps
+; LOGGING
 ; ==============================================================================
-
 Log(message) {
     global LogFile
     try FileAppend(Format("{1} - {2}`n", A_Now, message), LogFile)
 }
 
-
 ; ==============================================================================
-; INITIALIZATION BLOCK — Validates inputs, prepares state, and builds monitor list
+; INITIALIZATION
 ; ==============================================================================
-
 Log("--- Script started ---")
 
-; --- Restore Brightness from Previous Session (if needed) ---
+; --- Restore Brightness from Previous Session ---
 if FileExist(RestoreFile) {
-    Log("Restore file found. Restoring brightness from previous session.")
+    Log("Restore file found. Restoring brightness.")
     try {
-        loop read RestoreFile
-        {
+        loop read RestoreFile {
             parts := StrSplit(A_LoopReadLine, ":")
             if (parts.Length = 2) {
-                id := parts[1]
-                brightness := Integer(parts[2])
-                Log("Restoring brightness for " . id . " to " . brightness . "%")
-                SetBrightness(id, brightness)
+                SetBrightness(parts[1], Integer(parts[2]))
             }
         }
         FileDelete(RestoreFile)
-        Log("Brightness restored and restore file deleted.")
     } catch {
-        Log("ERROR: Failed to process brightness restore file.")
+        Log("ERROR: Failed to process restore file.")
     }
 }
 
-; --- Handle required command-line arguments ---
+; --- Argument Parsing ---
 if A_Args.Length < 2 {
-    Log("ERROR: Not enough arguments passed.")
-    MsgBox("This script requires 2 arguments:`n1. Monitor configuration list`n2. Idle timeout (ms).", "Error", 48)
+    MsgBox("Requires 2 arguments:`n1. Config List`n2. Idle Timeout (ms)", "Error", 48)
     ExitApp
 }
 
 MonitorConfigList := A_Args[1]
 IdleThreshold := Integer(A_Args[2])
 
-Log("Monitor Config list: " . MonitorConfigList)
-Log("Idle threshold: " . IdleThreshold . " ms")
+Log("Config: " . MonitorConfigList)
+Log("Threshold: " . IdleThreshold)
+Log("Settings: PrimaryBlackout=" . PrimaryMonitorBlackout . ", IndependentSleep=" . SleepRegardlessOfOutsideActivity . ", KeepActiveCursor=" . KeepActiveIfCursorPresent)
 
-; --- Ensure cleanup on script exit ---
 OnExit(CleanupOnExit)
 
+; --- Monitor Setup ---
 primaryRect := GetPrimaryRect()
 
-; --- Parse and initialize each monitor configuration ---
 for config in StrSplit(MonitorConfigList, ";") {
     parts := StrSplit(config, ":")
     id := Trim(parts[1])
-
     if id = ""
         continue
 
-    Log("Attempting to initialize monitor: " . id)
     monitorRect := GetMonitorRect(id)
-
     if monitorRect {
-        ; Base state for any monitored screen
+        isPrimary := RectsEqual(monitorRect, primaryRect)
+        
+        ; Setup Screen State Object
         screenState := Map(
             "ID", id,
             "Rect", monitorRect,
-            "IsPrimary", RectsEqual(monitorRect, primaryRect),
-            "OriginalBrightness", -1, ; -1 indicates not yet recorded
+            "IsPrimary", isPrimary,
+            "OriginalBrightness", -1,
             "IsModified", false,
-            "LastActiveTime", A_TickCount
+            "LastActiveTime", A_TickCount,
+            "Action", "",
+            "Gui", "",
+            "TargetDimLevel", 0
         )
 
-        if (screenState["IsPrimary"])
-            Log("Monitor " . id . " detected as PRIMARY (hybrid idle mode enabled).")
-
         action := Trim(parts[2])
-        if (action = "blackout" && parts.Length = 2) {
-            blackoutGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
-            ; WS_EX_NOACTIVATE (0x08000000) | WS_EX_TRANSPARENT (0x20)
-            ; We use transparent initially to allow click-through while "hidden" (Alpha 0)
-            blackoutGui.Opt("+E0x08000020") 
+        
+        if (action = "blackout") {
+            ; Create GUI immediately but keep hidden/transparent
+            blackoutGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x08000020") ; WS_EX_NOACTIVATE | TRANSPARENT
             blackoutGui.BackColor := "000000"
-
-            ; Precompute geometry + show options once (avoids resize lag on every blackout)
+            
             x := monitorRect["Left"], y := monitorRect["Top"]
             w := monitorRect["Right"] - monitorRect["Left"]
             h := monitorRect["Bottom"] - monitorRect["Top"]
-            showOpts := "x" x " y" y " w" w " h" h " NoActivate"
-
+            
             screenState["Action"] := "blackout"
             screenState["Gui"] := blackoutGui
-            screenState["ShowOpts"] := showOpts
-
-            ; Initialization: Show the window but make it fully transparent (Alpha 0).
-            ; This keeps the window in the DWM composition stack, preventing stutter
-            ; when we later make it visible (Alpha 255).
-            blackoutGui.Show(showOpts)
+            screenState["ShowOpts"] := "x" x " y" y " w" w " h" h " NoActivate"
+            
+            ; Initial show (invisible)
+            blackoutGui.Show(screenState["ShowOpts"])
             WinSetTransparent(0, blackoutGui.Hwnd)
-
-            Log("Monitor initialized: " . id)
-        }
+        } 
         else if (action = "dim" && parts.Length = 3) {
             screenState["Action"] := "dim"
             screenState["TargetDimLevel"] := Integer(Trim(parts[3]))
-            Log("Monitor initialized: " . id . " with target dim level: " . screenState["TargetDimLevel"] . "%")
         }
         else {
-            Log("WARNING: Invalid monitor configuration skipped: " . config)
             continue
         }
 
         MonitoredScreens.Push(screenState)
-    } else {
-        Log("ERROR: Could not find monitor ID: " . id)
-        MsgBox("Monitor not found: " . id ".`nPlease verify the ID and ensure MultiMonitorTool.exe is available.", "Warning", 48)
+        Log("Initialized monitor: " . id . (isPrimary ? " [PRIMARY]" : ""))
     }
 }
 
-if MonitoredScreens.Length = 0 {
-    Log("FATAL: No valid monitors were initialized.")
-    MsgBox("Initialization failed. No monitors found. Exiting.", "Error", 48)
-    ExitApp
-}
-
-Log("Initialization complete. Monitoring " . MonitoredScreens.Length . " screen(s).")
 SetTimer(CheckAllMonitors, CheckInterval)
 return
 
-
 ; ==============================================================================
-; MAIN LOOP — Checks each monitored screen for user activity or inactivity
+; MAIN LOOP
 ; ==============================================================================
-
 CheckAllMonitors(*) {
-    global MonitoredScreens, IdleThreshold, UseActiveWindowCheck
+    global MonitoredScreens, IdleThreshold
+    global PrimaryMonitorBlackout, SleepRegardlessOfOutsideActivity, KeepActiveIfCursorPresent
 
     CoordMode("Mouse", "Screen")
     MouseGetPos(&mx, &my)
-
-    ; Global physical idle time (mouse/keyboard inactivity)
+    
+    ; Physical idle time (keyboard/mouse anywhere)
     globalIdleMs := A_TimeIdlePhysical
+    
+    ; Is there ANY user input happening right now?
+    globalInputActive := (globalIdleMs < 100) 
 
     for screen in MonitoredScreens {
         rect := screen["Rect"]
-        activity := false
+        
+        ; 1. Check if mouse is on this specific monitor
+        isMouseOnScreen := (mx >= rect["Left"] && mx < rect["Right"] && my >= rect["Top"] && my < rect["Bottom"])
+        
+        ; 2. Determine "Activity" based on Settings
+        isActive := false
 
-        ; ---------------------------
-        ; HYBRID ACTIVITY DETECTION
-        ; ---------------------------
-        if (screen["IsPrimary"]) {
-            ; PRIMARY: treat as active only when there was physical input recently
-            activity := (globalIdleMs <= IdleThreshold)
-        } else {
-            ; SECONDARY: per-monitor activity (cursor position)
-            if (mx >= rect["Left"] && mx < rect["Right"] && my >= rect["Top"] && my < rect["Bottom"]) {
-                activity := true
-            }
-
-            ; Optional: active window check (disabled by default via UseActiveWindowCheck)
-            if !activity && UseActiveWindowCheck {
-                try {
-                    if activeWin := WinActive("A") {
-                        WinGetPos(&wx, &wy, &ww, &wh, activeWin)
-                        winCenterX := wx + (ww // 2)
-                        winCenterY := wy + (wh // 2)
-                        if (winCenterX >= rect["Left"] && winCenterX < rect["Right"]
-                            && winCenterY >= rect["Top"] && winCenterY < rect["Bottom"]) {
-                            activity := true
-                        }
-                    }
-                } catch {
-                    Log("WARNING: Failed to get active window position.")
-                }
-            }
+        ; RULE A: If "SleepRegardless" is OFF, global activity wakes everyone.
+        if (!SleepRegardlessOfOutsideActivity && globalInputActive) {
+            isActive := true
+        }
+        ; RULE B: Mouse movement on THIS monitor always counts as activity.
+        else if (isMouseOnScreen && globalInputActive) {
+            isActive := true
+        }
+        ; RULE C: Static cursor presence (if configured).
+        else if (isMouseOnScreen && KeepActiveIfCursorPresent) {
+            isActive := true
         }
 
-        ; ---------------------------
-        ; REACTION: ACTIVITY
-        ; ---------------------------
-        if activity {
-            ; For secondary monitors we keep per-monitor LastActiveTime.
-            ; For primary we still update it (harmless), but idle logic below uses globalIdleMs.
+        ; 3. Update State Timers
+        if (isActive) {
             screen["LastActiveTime"] := A_TickCount
+        }
 
-            if screen["IsModified"] {
-                if (screen["Action"] = "dim") {
-                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness to " . screen["OriginalBrightness"] . "%.")
-                    SetBrightness(screen["ID"], screen["OriginalBrightness"])
-                } else {
-                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and transparency.")
-                    
-                    ; Restore transparency to 0 (Invisible) and enable Click-through (+E0x20).
-                    ; This prevents stutter compared to using Hide().
-                    screen["Gui"].Opt("+E0x20")
-                    WinSetTransparent(0, screen["Gui"].Hwnd)
-                    
-                    ShowCursor()
-                }
+        ; 4. Calculate Idle Time for this monitor
+        currentMonitorIdle := A_TickCount - screen["LastActiveTime"]
+        
+        ; ---------------------------------------------------------
+        ; LOGIC: WAKE UP
+        ; ---------------------------------------------------------
+        if (isActive && screen["IsModified"]) {
+            Log("Waking up: " . screen["ID"])
+            
+            ShowCursor() 
 
-                screen["IsModified"] := false
-                ClearRestoreState(screen["ID"])
-            }
-
-        ; ---------------------------
-        ; REACTION: IDLE
-        ; ---------------------------
-        } else {
-            idleExceeded := false
-
-            if (screen["IsPrimary"]) {
-                ; PRIMARY: idle is based on global physical idle time
-                idleExceeded := (!screen["IsModified"] && (globalIdleMs > IdleThreshold))
+            if (screen["Action"] = "dim") {
+                SetBrightness(screen["ID"], screen["OriginalBrightness"])
             } else {
-                ; SECONDARY: idle is based on per-monitor LastActiveTime
-                idleExceeded := (!screen["IsModified"] && (A_TickCount - screen["LastActiveTime"] > IdleThreshold))
+                ; Restore transparency (make invisible) and click-through
+                screen["Gui"].Opt("+E0x20") 
+                WinSetTransparent(0, screen["Gui"].Hwnd)
+            }
+            
+            screen["IsModified"] := false
+            ClearRestoreState(screen["ID"])
+        }
+        
+        ; ---------------------------------------------------------
+        ; LOGIC: GO TO SLEEP
+        ; ---------------------------------------------------------
+        else if (!isActive && !screen["IsModified"] && currentMonitorIdle > IdleThreshold) {
+            
+            if (screen["IsPrimary"] && !PrimaryMonitorBlackout) {
+                continue
             }
 
-            if idleExceeded {
-                currentBrightness := GetBrightness(screen["ID"])
-                screen["OriginalBrightness"] := currentBrightness
-                SaveRestoreState(screen["ID"], currentBrightness)
+            Log("Sleeping: " . screen["ID"])
+            
+            currentB := GetBrightness(screen["ID"])
+            screen["OriginalBrightness"] := currentB
+            SaveRestoreState(screen["ID"], currentB)
 
-                if (screen['Action'] = "dim") {
-                    Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
-                    SetBrightness(screen['ID'], screen['TargetDimLevel'])
-                }
-                else { ; blackout
-                    Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
+            if (screen["Action"] = "dim") {
+                SetBrightness(screen["ID"], screen["TargetDimLevel"])
+            } else {
+                ; Only hide cursor if it's actually on this screen
+                if (isMouseOnScreen) {
                     HideCursor()
-
-                    ; Remove Click-through (-E0x20) so the black screen blocks interaction,
-                    ; then set Transparency to 255 (Fully Opaque).
-                    screen["Gui"].Opt("-E0x20")
-                    WinSetTransparent(255, screen["Gui"].Hwnd)
-                    
-                    ; Ensure it's on top without activating (refreshing position if needed)
-                    screen["Gui"].Show("NoActivate") 
                 }
 
-                screen["IsModified"] := true
+                ; Make opaque and block clicks
+                screen["Gui"].Opt("-E0x20") 
+                WinSetTransparent(255, screen["Gui"].Hwnd)
+                screen["Gui"].Show("NoActivate") 
             }
+            
+            screen["IsModified"] := true
         }
     }
 }
 
-
-
 ; ==============================================================================
-; HELPER FUNCTIONS — Wrappers for external monitor tools
+; HELPER FUNCTIONS
 ; ==============================================================================
 
-; Sets monitor brightness to a specific value using ControlMyMonitor.exe
 SetBrightness(monitorID, brightness) {
     global ControlTool
-    cmd := Format('"{1}" /SetValue "{2}\Monitor0" 10 {3}', ControlTool, monitorID, brightness)
-    RunWait(cmd,, "Hide")
+    try RunWait(Format('"{1}" /SetValue "{2}\Monitor0" 10 {3}', ControlTool, monitorID, brightness),, "Hide")
 }
 
-; Gets the current brightness of a monitor
 GetBrightness(monitorID) {
     global ControlTool
-    return RunWait(Format('"{1}" /GetValue "{2}\Monitor0" 10', ControlTool, monitorID),, "Hide")
-}
-
-GetPrimaryRect() {
-    try {
-        idx := MonitorGetPrimary()
-        MonitorGet(idx, &l, &t, &r, &b)
-        return Map("Left", l, "Top", t, "Right", r, "Bottom", b)
-    } catch {
-        ; Fallback: assume primary starts at (0,0)
-        return Map("Left", 0, "Top", 0, "Right", 0, "Bottom", 0)
-    }
-}
-
-RectsEqual(a, b) {
-    return (a["Left"] = b["Left"]
-        && a["Top"] = b["Top"]
-        && a["Right"] = b["Right"]
-        && a["Bottom"] = b["Bottom"])
-}
-
-
-; Gets a monitor's screen coordinates using MultiMonitorTool.exe
-GetMonitorRect(monitorID) {
-    global MultiTool, TempCsvFile
-    Log("Querying geometry for: " . monitorID)
-
-    ; Export current monitor data to temporary CSV file
-    RunWait(Format('"{1}" /scomma "{2}"', MultiTool, TempCsvFile),, "Hide")
-    if !FileExist(TempCsvFile) {
-        Log("ERROR: Output CSV not found after running MultiMonitorTool.")
-        return false
-    }
-
-    csvData := FileRead(TempCsvFile)
-    Loop Parse csvData, "`n", "`r" {
-        if A_Index = 1 || A_LoopField = ""
-            continue ; Skip header or blank line
-
-        columns := []
-        Loop Parse A_LoopField, "CSV" {
-            columns.Push(A_LoopField)
-        }
-
-        ; Column 13 = Monitor ID. Match against target.
-        if (columns.Length >= 13 && columns[13] = monitorID) {
-            Log("Found matching monitor entry.")
-
-            ; Parse resolution and position
-            res := StrSplit(columns[1], "X")
-            width := Integer(Trim(res[1]))
-            height := Integer(Trim(res[2]))
-
-            pos := StrSplit(columns[2], ",")
-            left := Integer(Trim(pos[1]))
-            top := Integer(Trim(pos[2]))
-
-            ; Log complete geometry information
-            Log("Monitor Geometry Details:")
-            Log("  Monitor ID: " . monitorID)
-            Log("  Resolution: " . width . "x" . height)
-            Log("  Position: Left=" . left . ", Top=" . top)
-            Log("  Bounds: Right=" . (left + width) . ", Bottom=" . (top + height))
-            Log("  Full Rect: {Left:" . left . ", Top:" . top . ", Right:" . (left + width) . ", Bottom:" . (top + height) . "}")
-
-            FileDelete(TempCsvFile)
-
-            return Map(
-                "Left", left,
-                "Top", top,
-                "Right", left + width,
-                "Bottom", top + height
-            )
-        }
-    }
-
-    Log("ERROR: Monitor not found in CSV: " . monitorID)
-    FileDelete(TempCsvFile)
-    return false
+    try return RunWait(Format('"{1}" /GetValue "{2}\Monitor0" 10', ControlTool, monitorID),, "Hide")
+    return 50
 }
 
 HideCursor() {
     global CursorHidden
     if CursorHidden
         return
-
-    while DllCall("user32\ShowCursor", "Int", false, "Int") >= 0 {
-    }
+    DllCall("user32\ShowCursor", "Int", false)
     CursorHidden := true
 }
 
@@ -408,101 +279,89 @@ ShowCursor() {
     global CursorHidden
     if !CursorHidden
         return
-
-    while DllCall("user32\ShowCursor", "Int", true, "Int") < 0 {
-    }
+    DllCall("user32\ShowCursor", "Int", true)
     CursorHidden := false
 }
 
-; ==============================================================================
-; STATE MANAGEMENT FUNCTIONS — Manages the sleeper_restore.dat file
-; ==============================================================================
-
-SaveRestoreState(monitorID, brightness) {
-    global RestoreFile
-    Log("Saving restore state for " . monitorID . " -> " . brightness . "%")
-
-    content := ""
-    found := false
-    if FileExist(RestoreFile) {
-        loop read RestoreFile
-        {
-            if InStr(A_LoopReadLine, monitorID . ":") {
-                content .= monitorID . ":" . brightness . "`n"
-                found := true
-            } else {
-                content .= A_LoopReadLine . "`n"
-            }
-        }
-    }
-    if !found {
-        content .= monitorID . ":" . brightness . "`n"
-    }
-
+GetPrimaryRect() {
     try {
-        file := FileOpen(RestoreFile, "w", "UTF-8")
-        file.Write(Trim(content, "`n"))
-        file.Close()
-    } catch {
-        Log("ERROR: Failed to write to restore file.")
+        MonitorGet(MonitorGetPrimary(), &l, &t, &r, &b)
+        return Map("Left", l, "Top", t, "Right", r, "Bottom", b)
     }
+    return Map("Left", 0, "Top", 0, "Right", 0, "Bottom", 0)
 }
 
-ClearRestoreState(monitorID) {
-    global RestoreFile
-    Log("Clearing restore state for " . monitorID)
+GetMonitorRect(monitorID) {
+    global MultiTool, TempCsvFile
+    RunWait(Format('"{1}" /scomma "{2}"', MultiTool, TempCsvFile),, "Hide")
+    if !FileExist(TempCsvFile)
+        return false
 
+    ret := false
+    try {
+        loop read TempCsvFile {
+            if (A_Index > 1 && InStr(A_LoopReadLine, monitorID)) {
+                Loop Parse A_LoopReadLine, "CSV" {
+                    row := []
+                    Loop Parse A_LoopReadLine, "CSV"
+                        row.Push(A_LoopField)
+                    
+                    if (row.Length >= 13 && row[13] = monitorID) {
+                        res := StrSplit(row[1], "X"), w := Integer(res[1]), h := Integer(res[2])
+                        pos := StrSplit(row[2], ","), l := Integer(pos[1]), t := Integer(pos[2])
+                        ret := Map("Left", l, "Top", t, "Right", l+w, "Bottom", t+h)
+                        break
+                    }
+                }
+            }
+            if ret
+                break
+        }
+    }
+    FileDelete(TempCsvFile)
+    return ret
+}
+
+RectsEqual(a, b) {
+    return (a["Left"]=b["Left"] && a["Top"]=b["Top"] && a["Right"]=b["Right"] && a["Bottom"]=b["Bottom"])
+}
+
+; ==============================================================================
+; STATE & CLEANUP
+; ==============================================================================
+
+SaveRestoreState(id, val) {
+    global RestoreFile
+    try FileAppend(id . ":" . val . "`n", RestoreFile)
+}
+
+ClearRestoreState(id) {
+    global RestoreFile
     if !FileExist(RestoreFile)
         return
-
-    content := ""
-    loop read RestoreFile
-    {
-        if !InStr(A_LoopReadLine, monitorID . ":") {
-            content .= A_LoopReadLine . "`n"
-        }
+    
+    text := ""
+    loop read RestoreFile {
+        if !InStr(A_LoopReadLine, id . ":")
+            text .= A_LoopReadLine . "`n"
     }
-
     try {
-        file := FileOpen(RestoreFile, "w", "UTF-8")
-        file.Write(Trim(content, "`n"))
-        file.Close()
-        ; If the file is now empty, delete it
-        if (file.Length = 0) {
+        FileOpen(RestoreFile, "w").Write(text)
+        if (text = "")
             FileDelete(RestoreFile)
-        }
-    } catch {
-        Log("ERROR: Failed to clear from restore file.")
     }
 }
-
-
-; ==============================================================================
-; CLEANUP FUNCTION — Destroys GUI overlays and restores brightness on manual exit
-; ==============================================================================
 
 CleanupOnExit(ExitReason, ExitCode) {
     global MonitoredScreens
-    Log("--- Exiting (Reason: " . ExitReason . ") ---")
-
     ShowCursor()
-
     for screen in MonitoredScreens {
-        try {
-            ; Since OnExit only triggers from a tray menu exit, we always restore.
-            if (screen['IsModified'] && ExitReason = 'Menu') {
-                Log("Restoring brightness for monitor: " . screen['ID'] . " to " . screen['OriginalBrightness'] . "%")
-                SetBrightness(screen['ID'], screen['OriginalBrightness'])
-                ClearRestoreState(screen['ID'])
-            }
-            if (screen.Has("Gui") && IsObject(screen['Gui'])) {
-                screen['Gui'].Destroy()
-                Log("Destroyed GUI for monitor: " . screen['ID'])
-            }
-        } catch {
-            Log("WARNING: Failed to clean up for: " . screen['ID'])
+        if (screen["IsModified"]) {
+            SetBrightness(screen["ID"], screen["OriginalBrightness"])
         }
+        if (IsObject(screen["Gui"]))
+            screen["Gui"].Destroy()
     }
-
-    Log("Cleanup completed.")
+    if FileExist(RestoreFile)
+        FileDelete(RestoreFile)
 }
