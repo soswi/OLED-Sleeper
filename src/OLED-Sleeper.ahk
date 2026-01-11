@@ -38,7 +38,7 @@ global RestoreFile := ProjectRoot . "\config\sleeper_restore.dat"
 ; === CONFIGURATION VARIABLES ===
 global MonitorConfigList := ""  ; Stores the raw input list of monitor configurations
 global IdleThreshold := 0       ; Time (ms) before a monitor is considered idle
-global CheckInterval := 50      ; Frequency (ms) to check each monitor's state
+global CheckInterval := 150      ; Frequency (ms) to check each monitor's state
 global UseActiveWindowCheck := false  ; default OFF (prevents instant restore on primary)
 global CursorHidden := false  ; Tracks cursor visibility state
 
@@ -129,12 +129,24 @@ for config in StrSplit(MonitorConfigList, ";") {
 
         action := Trim(parts[2])
         if (action = "blackout" && parts.Length = 2) {
-            ; Create a GUI window that fills the screen and is invisible to the taskbar
             blackoutGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
-            blackoutGui.BackColor := "000000" ; Fully black window
+            blackoutGui.Opt("+E0x08000000")
+            blackoutGui.BackColor := "000000"
+
+            ; Precompute geometry + show options once (avoids resize lag on every blackout)
+            x := monitorRect["Left"], y := monitorRect["Top"]
+            w := monitorRect["Right"] - monitorRect["Left"]
+            h := monitorRect["Bottom"] - monitorRect["Top"]
+            showOpts := "x" x " y" y " w" w " h" h " NoActivate"
 
             screenState["Action"] := "blackout"
             screenState["Gui"] := blackoutGui
+            screenState["ShowOpts"] := showOpts
+
+            ; Warm-up: show once to let DWM allocate resources, then hide
+            blackoutGui.Show(showOpts)
+            blackoutGui.Hide()
+
             Log("Monitor initialized: " . id)
         }
         else if (action = "dim" && parts.Length = 3) {
@@ -261,9 +273,7 @@ CheckAllMonitors(*) {
                 Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
                 HideCursor()
 
-                x := rect["Left"], y := rect["Top"]
-                w := rect["Right"] - rect["Left"], h := rect["Bottom"] - rect["Top"]
-                screen["Gui"].Show("x" . x . " y" . y . " w" . w . " h" . h . " NoActivate")
+                screen["Gui"].Show("NoActivate")
             }
 
 
