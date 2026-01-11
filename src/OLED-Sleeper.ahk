@@ -573,8 +573,9 @@ ClearRestoreState(monitorID) {
         file := FileOpen(RestoreFile, "w", "UTF-8")
         file.Write(Trim(content, "`n"))
         file.Close()
-        ; If the file is now empty, delete it
-        if (file.Length = 0) {
+
+        ; If file is empty after rewrite, delete it
+        if (FileGetSize(RestoreFile) = 0) {
             FileDelete(RestoreFile)
         }
     } catch {
@@ -596,9 +597,10 @@ CleanupOnExit(ExitReason, ExitCode) {
     for screen in MonitoredScreens {
         try {
             ; Since OnExit only triggers from a tray menu exit, we always restore.
-            if (screen['IsModified']) {
-                Log("Restoring brightness for monitor: " . screen['ID'] . " to " . screen['OriginalBrightness'] . "%")
-                SetBrightness(screen['ID'], screen['OriginalBrightness'])
+            ; Only DIM mode changes brightness, so only DIM needs brightness restore.
+            if (screen["IsModified"] && screen["Action"] = "dim" && screen["OriginalBrightness"] >= 0) {
+                Log("Restoring brightness for monitor: " . screen["ID"] . " to " . screen["OriginalBrightness"] . "%")
+                SetBrightness(screen["ID"], screen["OriginalBrightness"])
             }
             if (screen.Has("Gui") && IsObject(screen['Gui'])) {
                 screen['Gui'].Destroy()
