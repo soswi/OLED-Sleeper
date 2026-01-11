@@ -174,21 +174,25 @@ CheckAllMonitors(*) {
         }
 
         ; === Activity check 2: Active window is located on this monitor ===
-        if !activity {
+        ; Disabled by default because on a primary monitor the active window
+        ; is almost always on the same display, preventing idle from ever triggering.
+        ; If you want the old behavior back, set this to true.
+        UseActiveWindowCheck := false
+
+        if !activity && UseActiveWindowCheck {
             try {
                 if activeWin := WinActive("A") {
-                    ; Get the window's position (x,y) AND its size (width, height)
                     WinGetPos(&wx, &wy, &ww, &wh, activeWin)
-                    ; Calculate the absolute center point of the window
                     winCenterX := wx + (ww // 2)
                     winCenterY := wy + (wh // 2)
-                    ; Check if the window's CENTER POINT is on the monitor
                     if (winCenterX >= rect['Left'] && winCenterX < rect['Right'] && winCenterY >= rect['Top'] && winCenterY < rect['Bottom']) {
                         activity := true
                     }
                 }
+            } catch {
+                Log("WARNING: Failed to get active window position.")
             }
-        }
+        } 
 
         ; === Reaction: Activity detected ===
         if activity {
