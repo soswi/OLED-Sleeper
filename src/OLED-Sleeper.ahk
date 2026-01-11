@@ -223,12 +223,16 @@ CheckAllMonitors(*) {
                 SetBrightness(screen['ID'], screen['TargetDimLevel'])
             }
             else { ; blackout
-                Log(screen['ID'] . " exceeded idle threshold. Blacking out (overlay).")
+                Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay + dim).")
 
-                x := rect['Left'], y := rect['Top']
-                w := rect['Right'] - rect['Left'], h := rect['Bottom'] - rect['Top']
-                screen['Gui'].Show("x" . x . " y" . y . " w" . w . " h" . h . " NoActivate")
+                ; Optional: dim to 0 to also eliminate the visible cursor on top of the overlay
+                try SetBrightness(screen["ID"], 0)
+
+                x := rect["Left"], y := rect["Top"]
+                w := rect["Right"] - rect["Left"], h := rect["Bottom"] - rect["Top"]
+                screen["Gui"].Show("x" . x . " y" . y . " w" . w . " h" . h . " NoActivate")
             }
+
 
 
             screen['IsModified'] := true
