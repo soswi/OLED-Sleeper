@@ -130,7 +130,9 @@ for config in StrSplit(MonitorConfigList, ";") {
         action := Trim(parts[2])
         if (action = "blackout" && parts.Length = 2) {
             blackoutGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
-            blackoutGui.Opt("+E0x08000000")
+            ; WS_EX_NOACTIVATE (0x08000000) | WS_EX_TRANSPARENT (0x20)
+            ; We use transparent initially to allow click-through while "hidden" (Alpha 0)
+            blackoutGui.Opt("+E0x08000020") 
             blackoutGui.BackColor := "000000"
 
             ; Precompute geometry + show options once (avoids resize lag on every blackout)
@@ -143,9 +145,11 @@ for config in StrSplit(MonitorConfigList, ";") {
             screenState["Gui"] := blackoutGui
             screenState["ShowOpts"] := showOpts
 
-            ; Warm-up: show once to let DWM allocate resources, then hide
+            ; Initialization: Show the window but make it fully transparent (Alpha 0).
+            ; This keeps the window in the DWM composition stack, preventing stutter
+            ; when we later make it visible (Alpha 255).
             blackoutGui.Show(showOpts)
-            blackoutGui.Hide()
+            WinSetTransparent(0, blackoutGui.Hwnd)
 
             Log("Monitor initialized: " . id)
         }
@@ -214,7 +218,7 @@ CheckAllMonitors(*) {
                         winCenterX := wx + (ww // 2)
                         winCenterY := wy + (wh // 2)
                         if (winCenterX >= rect["Left"] && winCenterX < rect["Right"]
-                         && winCenterY >= rect["Top"] && winCenterY < rect["Bottom"]) {
+                            && winCenterY >= rect["Top"] && winCenterY < rect["Bottom"]) {
                             activity := true
                         }
                     }
@@ -235,13 +239,18 @@ CheckAllMonitors(*) {
             if screen["IsModified"] {
                 if (screen["Action"] = "dim") {
                     Log("Activity resumed on " . screen["ID"] . ". Restoring brightness to " . screen["OriginalBrightness"] . "%.")
+                    SetBrightness(screen["ID"], screen["OriginalBrightness"])
                 } else {
-                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and unhiding overlay.")
-                    screen["Gui"].Hide()
+                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and transparency.")
+                    
+                    ; Restore transparency to 0 (Invisible) and enable Click-through (+E0x20).
+                    ; This prevents stutter compared to using Hide().
+                    screen["Gui"].Opt("+E0x20")
+                    WinSetTransparent(0, screen["Gui"].Hwnd)
+                    
                     ShowCursor()
                 }
 
-                SetBrightness(screen["ID"], screen["OriginalBrightness"])
                 screen["IsModified"] := false
                 ClearRestoreState(screen["ID"])
             }
@@ -265,17 +274,22 @@ CheckAllMonitors(*) {
                 screen["OriginalBrightness"] := currentBrightness
                 SaveRestoreState(screen["ID"], currentBrightness)
 
-            if (screen['Action'] = "dim") {
-                Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
-                SetBrightness(screen['ID'], screen['TargetDimLevel'])
-            }
-            else { ; blackout
-                Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
-                HideCursor()
+                if (screen['Action'] = "dim") {
+                    Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
+                    SetBrightness(screen['ID'], screen['TargetDimLevel'])
+                }
+                else { ; blackout
+                    Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
+                    HideCursor()
 
-                screen["Gui"].Show("NoActivate")
-            }
-
+                    ; Remove Click-through (-E0x20) so the black screen blocks interaction,
+                    ; then set Transparency to 255 (Fully Opaque).
+                    screen["Gui"].Opt("-E0x20")
+                    WinSetTransparent(255, screen["Gui"].Hwnd)
+                    
+                    ; Ensure it's on top without activating (refreshing position if needed)
+                    screen["Gui"].Show("NoActivate") 
+                }
 
                 screen["IsModified"] := true
             }
