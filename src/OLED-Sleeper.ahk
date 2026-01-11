@@ -168,7 +168,6 @@ for config in StrSplit(MonitorConfigList, ";") {
         action := Trim(parts[2])
         if (action = "blackout") {
             blackoutGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
-            
             ; WS_EX_NOACTIVATE (0x08000000) | WS_EX_TRANSPARENT (0x20)
             ; We use transparent initially to allow click-through while "hidden" (Alpha 0)
             blackoutGui.Opt("+E0x08000020 +Owner") 
@@ -333,15 +332,17 @@ CheckAllMonitors(*) {
                 continue
             }
 
-            currentBrightness := GetBrightness(screen["ID"])
-            screen["OriginalBrightness"] := currentBrightness
-            SaveRestoreState(screen["ID"], currentBrightness)
-
-            if (screen['Action'] = "dim") {
-                Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
-                SetBrightness(screen['ID'], screen['TargetDimLevel'])
-            }
-            else { ; blackout
+            if (screen["Action"] = "dim") {
+                ; DIM needs original brightness (tool call), BLACKOUT does not.
+                currentBrightness := GetBrightness(screen["ID"])
+                screen["OriginalBrightness"] := currentBrightness
+                SaveRestoreState(screen["ID"], currentBrightness)
+        
+                Log(screen["ID"] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen["TargetDimLevel"] . "%.")
+                SetBrightness(screen["ID"], screen["TargetDimLevel"]) ; non-blocking is fine in most cases
+            } 
+            else { 
+                ; blackout
                 Log(screen["ID"] . " exceeded idle threshold. Blacking out.")
                 
                 ; Only hide cursor if it's currently on the screen going to sleep
@@ -349,6 +350,8 @@ CheckAllMonitors(*) {
                     HideCursor()
                 }
 
+                ; No external tools here -> no stutter from RunWait/Exec.
+                
                 ; Blackout Sequence (Optimized for less stutter):
                 ; 1. Make window Opaque (255) - Visual Blackout first
                 WinSetTransparent(255, screen["Gui"].Hwnd)
@@ -372,16 +375,37 @@ CheckAllMonitors(*) {
 ; ==============================================================================
 
 ; Sets monitor brightness to a specific value using ControlMyMonitor.exe
-SetBrightness(monitorID, brightness) {
+; Added 'wait' parameter to allow non-blocking execution
+SetBrightness(monitorID, brightness, wait := false) {
     global ControlTool
+    ; Writes VCP code 0x10 (decimal 16). Uses /SetValue.
     cmd := Format('"{1}" /SetValue "{2}\Monitor0" 10 {3}', ControlTool, monitorID, brightness)
-    try RunWait(cmd,, "Hide")
+
+    try {
+        if wait
+            RunWait(cmd,, "Hide")
+        else
+            Run(cmd,, "Hide")
+    } catch {
+        Log("ERROR: SetBrightness failed for " . monitorID . " -> " . brightness)
+    }
 }
 
 ; Gets the current brightness of a monitor
+; Optimized to use ExecStdout for better control
 GetBrightness(monitorID) {
     global ControlTool
-    try return RunWait(Format('"{1}" /GetValue "{2}\Monitor0" 10', ControlTool, monitorID),, "Hide")
+    ; Reads VCP code 0x10 (decimal 16) from StdOut.
+    cmd := Format('"{1}" /GetValue "{2}\Monitor0" 10', ControlTool, monitorID)
+
+    try {
+        out := ExecStdout(cmd, 1500)
+        ; Extract the first integer found in output.
+        if RegExMatch(out, "(\d+)", &m)
+            return Integer(m[1])
+    } catch as e {
+        Log("ERROR: GetBrightness failed for " . monitorID . " -> " . e.Message)
+    }
     return 50 ; Fallback safe value
 }
 
@@ -476,6 +500,23 @@ ShowCursor() {
     while DllCall("user32\ShowCursor", "Int", true, "Int") < 0 {
     }
     CursorHidden := false
+}
+
+ExecStdout(cmd, timeoutMs := 1500) {
+    ; Runs a process and returns its StdOut as text.
+    ; Uses a simple timeout to avoid hanging the script if the tool stalls.
+    sh := ComObject("WScript.Shell")
+    ex := sh.Exec(cmd)
+
+    start := A_TickCount
+    while (ex.Status = 0) {
+        if (A_TickCount - start > timeoutMs) {
+            try ex.Terminate()
+            throw Error("ExecStdout timeout: " cmd)
+        }
+        Sleep(10)
+    }
+    return ex.StdOut.ReadAll()
 }
 
 
