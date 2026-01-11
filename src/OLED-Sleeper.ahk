@@ -99,6 +99,8 @@ Log("Idle threshold: " . IdleThreshold . " ms")
 ; --- Ensure cleanup on script exit ---
 OnExit(CleanupOnExit)
 
+primaryRect := GetPrimaryRect()
+
 ; --- Parse and initialize each monitor configuration ---
 for config in StrSplit(MonitorConfigList, ";") {
     parts := StrSplit(config, ":")
@@ -115,10 +117,14 @@ for config in StrSplit(MonitorConfigList, ";") {
         screenState := Map(
             "ID", id,
             "Rect", monitorRect,
+            "IsPrimary", RectsEqual(monitorRect, primaryRect),
             "OriginalBrightness", -1, ; -1 indicates not yet recorded
             "IsModified", false,
             "LastActiveTime", A_TickCount
         )
+
+        if (screenState["IsPrimary"])
+            Log("Monitor " . id . " detected as PRIMARY (hybrid idle mode enabled).")
 
         action := Trim(parts[2])
         if (action = "blackout" && parts.Length = 2) {
@@ -164,59 +170,86 @@ return
 
 CheckAllMonitors(*) {
     global MonitoredScreens, IdleThreshold, UseActiveWindowCheck
-    CoordMode("Mouse", "Screen") ; Get mouse position relative to full screen
+
+    CoordMode("Mouse", "Screen")
     MouseGetPos(&mx, &my)
 
+    ; Global physical idle time (mouse/keyboard inactivity)
+    globalIdleMs := A_TimeIdlePhysical
+
     for screen in MonitoredScreens {
-        rect := screen['Rect']
+        rect := screen["Rect"]
         activity := false
 
-        ; === Activity check 1: Mouse cursor is currently on this monitor ===
-        if (mx >= rect['Left'] && mx < rect['Right'] && my >= rect['Top'] && my < rect['Bottom']) {
-            activity := true
+        ; ---------------------------
+        ; HYBRID ACTIVITY DETECTION
+        ; ---------------------------
+        if (screen["IsPrimary"]) {
+            ; PRIMARY: treat as active only when there was physical input recently
+            activity := (globalIdleMs <= IdleThreshold)
+        } else {
+            ; SECONDARY: per-monitor activity (cursor position)
+            if (mx >= rect["Left"] && mx < rect["Right"] && my >= rect["Top"] && my < rect["Bottom"]) {
+                activity := true
+            }
+
+            ; Optional: active window check (disabled by default via UseActiveWindowCheck)
+            if !activity && UseActiveWindowCheck {
+                try {
+                    if activeWin := WinActive("A") {
+                        WinGetPos(&wx, &wy, &ww, &wh, activeWin)
+                        winCenterX := wx + (ww // 2)
+                        winCenterY := wy + (wh // 2)
+                        if (winCenterX >= rect["Left"] && winCenterX < rect["Right"]
+                         && winCenterY >= rect["Top"] && winCenterY < rect["Bottom"]) {
+                            activity := true
+                        }
+                    }
+                } catch {
+                    Log("WARNING: Failed to get active window position.")
+                }
+            }
         }
 
-        ; === Activity check 2: Active window is located on this monitor ===
-        ; Disabled by default because on a primary monitor the active window
-        ; is almost always on the same display, preventing idle from ever triggering.
-        ; If you want the old behavior back, set this to true.
-
-        if !activity && UseActiveWindowCheck {
-            try {
-                if activeWin := WinActive("A") {
-                    WinGetPos(&wx, &wy, &ww, &wh, activeWin)
-                    winCenterX := wx + (ww // 2)
-                    winCenterY := wy + (wh // 2)
-                    if (winCenterX >= rect['Left'] && winCenterX < rect['Right'] && winCenterY >= rect['Top'] && winCenterY < rect['Bottom']) {
-                        activity := true
-                    }
-                }
-            } catch {
-                Log("WARNING: Failed to get active window position.")
-            }
-        } 
-
-        ; === Reaction: Activity detected ===
+        ; ---------------------------
+        ; REACTION: ACTIVITY
+        ; ---------------------------
         if activity {
-            screen['LastActiveTime'] := A_TickCount
+            ; For secondary monitors we keep per-monitor LastActiveTime.
+            ; For primary we still update it (harmless), but idle logic below uses globalIdleMs.
+            screen["LastActiveTime"] := A_TickCount
 
-            if screen['IsModified'] {
-                if (screen['Action'] = "dim") {
-                    Log("Activity resumed on " . screen['ID'] . ". Restoring brightness to " . screen['OriginalBrightness'] . "%.")
-                } else { ; blackout
-                    Log("Activity resumed on " . screen['ID'] . ". Restoring brightness and unhiding overlay.")
-                    screen['Gui'].Hide()
+            if screen["IsModified"] {
+                if (screen["Action"] = "dim") {
+                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness to " . screen["OriginalBrightness"] . "%.")
+                } else {
+                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and unhiding overlay.")
+                    screen["Gui"].Hide()
                 }
-                SetBrightness(screen['ID'], screen['OriginalBrightness'])
-                screen['IsModified'] := false
-                ClearRestoreState(screen['ID'])
+
+                SetBrightness(screen["ID"], screen["OriginalBrightness"])
+                screen["IsModified"] := false
+                ClearRestoreState(screen["ID"])
             }
 
-        ; === Reaction: Monitor has been idle for longer than threshold ===
-        } else if !screen['IsModified'] && (A_TickCount - screen['LastActiveTime'] > IdleThreshold) {
-            currentBrightness := GetBrightness(screen['ID'])
-            screen['OriginalBrightness'] := currentBrightness
-            SaveRestoreState(screen['ID'], currentBrightness)
+        ; ---------------------------
+        ; REACTION: IDLE
+        ; ---------------------------
+        } else {
+            idleExceeded := false
+
+            if (screen["IsPrimary"]) {
+                ; PRIMARY: idle is based on global physical idle time
+                idleExceeded := (!screen["IsModified"] && (globalIdleMs > IdleThreshold))
+            } else {
+                ; SECONDARY: idle is based on per-monitor LastActiveTime
+                idleExceeded := (!screen["IsModified"] && (A_TickCount - screen["LastActiveTime"] > IdleThreshold))
+            }
+
+            if idleExceeded {
+                currentBrightness := GetBrightness(screen["ID"])
+                screen["OriginalBrightness"] := currentBrightness
+                SaveRestoreState(screen["ID"], currentBrightness)
 
             if (screen['Action'] = "dim") {
                 Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
@@ -234,11 +267,12 @@ CheckAllMonitors(*) {
             }
 
 
-
-            screen['IsModified'] := true
+                screen["IsModified"] := true
+            }
         }
     }
 }
+
 
 
 ; ==============================================================================
@@ -257,6 +291,25 @@ GetBrightness(monitorID) {
     global ControlTool
     return RunWait(Format('"{1}" /GetValue "{2}\Monitor0" 10', ControlTool, monitorID),, "Hide")
 }
+
+GetPrimaryRect() {
+    try {
+        idx := MonitorGetPrimary()
+        MonitorGet(idx, &l, &t, &r, &b)
+        return Map("Left", l, "Top", t, "Right", r, "Bottom", b)
+    } catch {
+        ; Fallback: assume primary starts at (0,0)
+        return Map("Left", 0, "Top", 0, "Right", 0, "Bottom", 0)
+    }
+}
+
+RectsEqual(a, b) {
+    return (a["Left"] = b["Left"]
+        && a["Top"] = b["Top"]
+        && a["Right"] = b["Right"]
+        && a["Bottom"] = b["Bottom"])
+}
+
 
 ; Gets a monitor's screen coordinates using MultiMonitorTool.exe
 GetMonitorRect(monitorID) {
