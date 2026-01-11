@@ -40,6 +40,7 @@ global MonitorConfigList := ""  ; Stores the raw input list of monitor configura
 global IdleThreshold := 0       ; Time (ms) before a monitor is considered idle
 global CheckInterval := 50      ; Frequency (ms) to check each monitor's state
 global UseActiveWindowCheck := false  ; default OFF (prevents instant restore on primary)
+global CursorHidden := false  ; Tracks cursor visibility state
 
 
 ; === INTERNAL STATE ===
@@ -225,6 +226,7 @@ CheckAllMonitors(*) {
                 } else {
                     Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and unhiding overlay.")
                     screen["Gui"].Hide()
+                    ShowCursor()
                 }
 
                 SetBrightness(screen["ID"], screen["OriginalBrightness"])
@@ -256,10 +258,8 @@ CheckAllMonitors(*) {
                 SetBrightness(screen['ID'], screen['TargetDimLevel'])
             }
             else { ; blackout
-                Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay + dim).")
-
-                ; Optional: dim to 0 to also eliminate the visible cursor on top of the overlay
-                try SetBrightness(screen["ID"], 0)
+                Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
+                HideCursor()
 
                 x := rect["Left"], y := rect["Top"]
                 w := rect["Right"] - rect["Left"], h := rect["Bottom"] - rect["Top"]
@@ -370,6 +370,26 @@ GetMonitorRect(monitorID) {
     return false
 }
 
+HideCursor() {
+    global CursorHidden
+    if CursorHidden
+        return
+
+    while DllCall("user32\ShowCursor", "Int", false, "Int") >= 0 {
+    }
+    CursorHidden := true
+}
+
+ShowCursor() {
+    global CursorHidden
+    if !CursorHidden
+        return
+
+    while DllCall("user32\ShowCursor", "Int", true, "Int") < 0 {
+    }
+    CursorHidden := false
+}
+
 ; ==============================================================================
 ; STATE MANAGEMENT FUNCTIONS — Manages the sleeper_restore.dat file
 ; ==============================================================================
@@ -440,6 +460,8 @@ ClearRestoreState(monitorID) {
 CleanupOnExit(ExitReason, ExitCode) {
     global MonitoredScreens
     Log("--- Exiting (Reason: " . ExitReason . ") ---")
+
+    ShowCursor()
 
     for screen in MonitoredScreens {
         try {
