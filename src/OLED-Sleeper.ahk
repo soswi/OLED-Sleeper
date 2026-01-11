@@ -131,7 +131,7 @@ for config in StrSplit(MonitorConfigList, ";") {
         if (action = "blackout" && parts.Length = 2) {
             blackoutGui := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale")
             ; WS_EX_NOACTIVATE (0x08000000) | WS_EX_TRANSPARENT (0x20)
-            ; We use transparent initially to allow click-through while hidden
+            ; We use transparent initially to allow click-through while "hidden" (Alpha 0)
             blackoutGui.Opt("+E0x08000020") 
             blackoutGui.BackColor := "000000"
 
@@ -239,8 +239,9 @@ CheckAllMonitors(*) {
             if screen["IsModified"] {
                 if (screen["Action"] = "dim") {
                     Log("Activity resumed on " . screen["ID"] . ". Restoring brightness to " . screen["OriginalBrightness"] . "%.")
+                    SetBrightness(screen["ID"], screen["OriginalBrightness"])
                 } else {
-                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and unhiding overlay.")
+                    Log("Activity resumed on " . screen["ID"] . ". Restoring brightness and transparency.")
                     
                     ; Restore transparency to 0 (Invisible) and enable Click-through (+E0x20).
                     ; This prevents stutter compared to using Hide().
@@ -250,7 +251,6 @@ CheckAllMonitors(*) {
                     ShowCursor()
                 }
 
-                SetBrightness(screen["ID"], screen["OriginalBrightness"])
                 screen["IsModified"] := false
                 ClearRestoreState(screen["ID"])
             }
@@ -274,23 +274,22 @@ CheckAllMonitors(*) {
                 screen["OriginalBrightness"] := currentBrightness
                 SaveRestoreState(screen["ID"], currentBrightness)
 
-            if (screen['Action'] = "dim") {
-                Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
-                SetBrightness(screen['ID'], screen['TargetDimLevel'])
-            }
-            else { ; blackout
-                Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
-                HideCursor()
+                if (screen['Action'] = "dim") {
+                    Log(screen['ID'] . " exceeded idle threshold. Dimming from " . currentBrightness . "% to " . screen['TargetDimLevel'] . "%.")
+                    SetBrightness(screen['ID'], screen['TargetDimLevel'])
+                }
+                else { ; blackout
+                    Log(screen["ID"] . " exceeded idle threshold. Blacking out (overlay).")
+                    HideCursor()
 
-                ; Remove Click-through (-E0x20) so the black screen blocks interaction,
-                ; then set Transparency to 255 (Fully Opaque).
-                screen["Gui"].Opt("-E0x20")
-                WinSetTransparent(255, screen["Gui"].Hwnd)
-                
-                ; Ensure it's on top without activating
-                screen["Gui"].Show("NoActivate") 
-            }
-
+                    ; Remove Click-through (-E0x20) so the black screen blocks interaction,
+                    ; then set Transparency to 255 (Fully Opaque).
+                    screen["Gui"].Opt("-E0x20")
+                    WinSetTransparent(255, screen["Gui"].Hwnd)
+                    
+                    ; Ensure it's on top without activating (refreshing position if needed)
+                    screen["Gui"].Show("NoActivate") 
+                }
 
                 screen["IsModified"] := true
             }
