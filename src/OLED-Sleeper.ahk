@@ -39,6 +39,8 @@ global RestoreFile := ProjectRoot . "\config\sleeper_restore.dat"
 global MonitorConfigList := ""  ; Stores the raw input list of monitor configurations
 global IdleThreshold := 0       ; Time (ms) before a monitor is considered idle
 global CheckInterval := 50      ; Frequency (ms) to check each monitor's state
+global UseActiveWindowCheck := false  ; default OFF (prevents instant restore on primary)
+
 
 ; === INTERNAL STATE ===
 global MonitoredScreens := []   ; List of monitor state maps for each target screen
@@ -161,6 +163,7 @@ return
 ; ==============================================================================
 
 CheckAllMonitors(*) {
+    global MonitoredScreens, IdleThreshold, UseActiveWindowCheck
     CoordMode("Mouse", "Screen") ; Get mouse position relative to full screen
     MouseGetPos(&mx, &my)
 
@@ -177,7 +180,6 @@ CheckAllMonitors(*) {
         ; Disabled by default because on a primary monitor the active window
         ; is almost always on the same display, preventing idle from ever triggering.
         ; If you want the old behavior back, set this to true.
-        UseActiveWindowCheck := false
 
         if !activity && UseActiveWindowCheck {
             try {
@@ -221,13 +223,13 @@ CheckAllMonitors(*) {
                 SetBrightness(screen['ID'], screen['TargetDimLevel'])
             }
             else { ; blackout
-                Log(screen['ID'] . " exceeded idle threshold. Dimming to 0% and blacking out.")
-                SetBrightness(screen['ID'], 0)
+                Log(screen['ID'] . " exceeded idle threshold. Blacking out (overlay).")
 
                 x := rect['Left'], y := rect['Top']
                 w := rect['Right'] - rect['Left'], h := rect['Bottom'] - rect['Top']
                 screen['Gui'].Show("x" . x . " y" . y . " w" . w . " h" . h . " NoActivate")
             }
+
 
             screen['IsModified'] := true
         }
