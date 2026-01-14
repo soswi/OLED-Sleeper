@@ -31,17 +31,22 @@
 ; ==============================================================================
 ; GLOBAL SETTINGS (User Configuration)
 ; ==============================================================================
-global PrimaryMonitorBlackout           := 1  ; 1 = Allow primary to sleep, 0 = Primary always stays on
+global PrimaryMonitorBlackout           := 1  ; 1 = Allow primary to sleep, 
+                                              ; 0 = Primary always stays on
+
 global SleepRegardlessOfOutsideActivity := 1  ; 1 = Monitor sleeps if IT is idle, even if you type on another screen
                                               ; 0 = If you are active ANYWHERE, ALL monitors stay awake
+                                              
 global KeepActiveIfCursorPresent        := 0  ; 1 = Monitor won't sleep if cursor is hovering (even if not moving)
-                                              ; 0 = Monitor sleeps if cursor is static (unless moving)
+                                              ; Applies to ANY monitor the cursor is on (Primary or Secondary)
 
 ; --- Content Awareness Settings ---
 global DetectContentChanges             := 1   ; 1 = Check for significant screen changes (video/games)
 global PixelCheckInterval               := 500 ; ms (Check pixels every X ms, distinct from main timer)
 global PixelSampleCount                 := 30  ; How many points to check per screen
-global PixelChangeThreshold             := 5   ; How many points must change to count as "Activity"
+global PixelChangeThreshold             := 10   ; How many points must change to count as "Activity"
+global CheckInterval                    := 200 ; ms (Main loop frequency)
+global GlobalIdleThreshold              := 800 ; ms (Consider global input active if idle < this)
 
 
 ; === PATH DEFINITIONS ===
@@ -226,7 +231,7 @@ return
 CheckAllMonitors(*) {
     global MonitoredScreens, IdleThreshold, LastPixelCheck, PixelCheckInterval
     global PrimaryMonitorBlackout, SleepRegardlessOfOutsideActivity, KeepActiveIfCursorPresent
-    global DetectContentChanges, PixelChangeThreshold
+    global DetectContentChanges, PixelChangeThreshold, GlobalIdleThreshold
 
     CoordMode("Mouse", "Screen")
     MouseGetPos(&mx, &my)
@@ -235,7 +240,7 @@ CheckAllMonitors(*) {
     globalIdleMs := A_TimeIdlePhysical
     
     ; Determine if there is any global input happening (< 100ms means user is active)
-    globalInputActive := (globalIdleMs < 100)
+    globalInputActive := (globalIdleMs < GlobalIdleThreshold)
 
     ; Throttle pixel checking to save CPU (run independently of main loop speed)
     runPixelCheck := (DetectContentChanges && (A_TickCount - LastPixelCheck > PixelCheckInterval))
